@@ -4,7 +4,7 @@ const ssdpDevices = [];
 let canEnable = false;
 
 function open() {
-    client = new WebSocket(`ws://${deviceIP}:8086`);
+    client = new WebSocket(`ws://192.168.0.47:8090`);
     client.onopen = onOpen;
     client.onmessage = onMessage;
     client.onerror = () => {
