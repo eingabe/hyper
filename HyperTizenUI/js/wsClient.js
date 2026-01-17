@@ -1,90 +1,108 @@
 let client;
-const PORTS = [8090, 8096];
-const IP_BASE = '192.168.0.';
-let isScanning = false;
+let deviceIP;
+const ssdpDevices = [];
+let canEnable = false;
 
-// UI Elemente umschalten
-function showManualInput() {
-    document.getElementById('status').innerHTML = 'Kein Gerät automatisch gefunden.';
-    document.getElementById('manualDiscovery').style.display = 'block';
-}
+const events = {
+    SetConfig: 0,
+    ReadConfig: 1,
+    ReadConfigResult: 2,
+    ScanSSDP: 3,
+    SSDPScanResult: 4
+};
 
-async function startSmartScan() {
-    if (isScanning) return;
-    isScanning = true;
-    document.getElementById('status').innerHTML = 'Scanne Netzwerk (192.168.0.x)...';
+function open() {
+    if (!deviceIP) {
+        console.error("Keine Device-IP vorhanden, WebSocket kann nicht geöffnet werden.");
+        return;
+    }
     
-    let foundAny = false;
+    // Verbindung zum lokalen HyperTizen-Dienst auf dem TV
+    client = new WebSocket(`ws://${deviceIP}:8086`);
+    
+    client.onopen = onOpen;
+    client.onmessage = onMessage;
+    
+    client.onerror = (err) => {
+        console.error("Backend WebSocket Fehler:", err);
+        document.getElementById('status').innerHTML = '<span style="color:red">Backend nicht erreichbar!</span>';
+        // KEIN location.reload() hier, um Boot-Loops zu vermeiden
+    };
+}
 
-    // Wir scannen in 10er Schritten, um den TV-Prozessor nicht zu blockieren
-    for (let i = 1; i <= 254; i++) {
-        const ip = IP_BASE + i;
-        
-        // Beide Ports gleichzeitig prüfen
-        const promises = PORTS.map(port => checkDevice(ip, port));
-        
-        const results = await Promise.all(promises);
-        if (results.some(r => r === true)) {
-            foundAny = true;
-            // Wir stoppen nicht zwingend beim ersten, damit die Liste voll wird
-        }
-
-        // Fortschrittsanzeige
-        if (i % 25 === 0) {
-            document.getElementById('status').innerHTML = `Scanning... ${Math.round((i/254)*100)}%`;
-        }
-    }
-
-    isScanning = false;
-    if (!foundAny) {
-        showManualInput();
+function send(json) {
+    if (client && client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify(json));
     }
 }
 
-function checkDevice(ip, port) {
-    return new Promise((resolve) => {
-        const testSocket = new WebSocket(`ws://${ip}:${port}`);
-        
-        // Timeout nach 1,5 Sekunden, falls der Port "hängt"
-        const timer = setTimeout(() => {
-            testSocket.close();
-            resolve(false);
-        }, 1500);
+function onOpen() {
+    document.getElementById('status').innerHTML = 'Verbunden mit lokalem Dienst';
+    
+    document.getElementById('enabled').onchange = (e) => {
+        if (!canEnable) {
+            alert('Bitte wähle zuerst einen Hyperion-Server aus!');
+            e.target.checked = false;
+            return;
+        }
+        send({ event: events.SetConfig, key: 'enabled', value: e.target.checked.toString() });
+    };
 
-        testSocket.onopen = () => {
-            clearTimeout(timer);
-            addDeviceToList(ip, port);
-            testSocket.close();
-            resolve(true);
-        };
-
-        testSocket.onerror = () => {
-            clearTimeout(timer);
-            resolve(false);
-        };
-    });
+    // Aktuelle Konfiguration vom Backend abfragen
+    send({ event: events.ReadConfig, key: 'rpcServer' });
+    send({ event: events.ReadConfig, key: 'enabled' });
+    
+    // Standard-SSDP Scan anstoßen
+    send({ event: events.ScanSSDP });
 }
 
-function addDeviceToList(ip, port) {
-    const url = `ws://${ip}:${port}`;
+function onMessage(data) {
+    const msg = JSON.parse(data.data);
+    switch(msg.Event) {
+        case events.ReadConfigResult:
+            if(msg.key === 'rpcServer' && !msg.error) {
+                canEnable = true;
+                document.getElementById('ssdpDeviceTitle').innerText = `Aktiv: ${msg.value}`;
+            } else if(msg.key === 'enabled' && !msg.error) {
+                document.getElementById('enabled').checked = msg.value === 'true';
+            }
+            break;
+            
+        case events.SSDPScanResult:
+            // Verarbeite Geräte, die das Backend per SSDP gefunden hat
+            if (msg.devices) {
+                for (const device of msg.devices) {
+                    const url = device.UrlBase.indexOf('https') === 0 ? 
+                                device.UrlBase.replace('https', 'wss') : 
+                                device.UrlBase.replace('http', 'ws');
+                    addDeviceToList(url, device.FriendlyName);
+                }
+            }
+            break;
+    }
+}
+
+// Hilfsfunktion, um Geräte in die Liste einzutragen (wird auch vom Smart-Scan genutzt)
+function addDeviceToList(url, name) {
+    if (ssdpDevices.some(d => d.url === url)) return;
+
     const container = document.getElementById('ssdpItems');
+    const div = document.createElement('div');
+    div.className = 'ssdpItem';
+    div.setAttribute('data-uri', url);
+    div.setAttribute('tabindex', '0');
+    div.innerHTML = `<a>${name} (${url})</a>`;
     
-    // Duplikate vermeiden
-    if (document.querySelector(`[data-uri="${url}"]`)) return;
-
-    const html = `
-        <div class="ssdpItem" data-uri="${url}" tabindex="0" onclick="setRPC('${url}')">
-            <a>Gefunden: ${ip} (Port ${port})</a>
-        </div>
-    `;
-    container.innerHTML += html;
+    // Klick-Event für die Auswahl
+    div.onclick = () => setRPC(url);
+    
+    container.appendChild(div);
+    ssdpDevices.push({ url, name });
 }
 
-// Manuelle Eingabe Funktion
-window.manualConnect = () => {
-    const customIP = document.getElementById('manualIP').value;
-    const customPort = document.getElementById('manualPort').value || '8090';
-    if(customIP) {
-        setRPC(`ws://${customIP}:${customPort}`);
-    }
-}
+window.setRPC = (url) => {
+    canEnable = true;
+    send({ event: events.SetConfig, key: 'rpcServer', value: url });
+    document.getElementById('ssdpDeviceTitle').innerText = `Verbunden mit: ${url}`;
+    alert("Server gespeichert!");
+};
