@@ -1,78 +1,90 @@
 let client;
-let deviceIP;
-const ssdpDevices = [];
-let canEnable = false;
+const PORTS = [8090, 8096];
+const IP_BASE = '192.168.0.';
+let isScanning = false;
 
-function open() {
-    client = new WebSocket(`ws://192.168.0.47:8090`);
-    client.onopen = onOpen;
-    client.onmessage = onMessage;
-    client.onerror = () => {
-        location.reload();
-    }
+// UI Elemente umschalten
+function showManualInput() {
+    document.getElementById('status').innerHTML = 'Kein Gerät automatisch gefunden.';
+    document.getElementById('manualDiscovery').style.display = 'block';
 }
 
-const events = {
-    SetConfig: 0,
-    ReadConfig: 1,
-    ReadConfigResult: 2,
-    ScanSSDP: 3,
-    SSDPScanResult: 4
-}
+async function startSmartScan() {
+    if (isScanning) return;
+    isScanning = true;
+    document.getElementById('status').innerHTML = 'Scanne Netzwerk (192.168.0.x)...';
+    
+    let foundAny = false;
 
-function send(json) {
-    client.send(JSON.stringify(json));
-}
-
-function onOpen() {
-    document.getElementById('status').innerHTML = 'Connected';
-    document.getElementById('enabled').onchange = (e) => {
-        if (!canEnable) {
-            alert('Please select a device first');
-            return e.target.checked = false;
+    // Wir scannen in 10er Schritten, um den TV-Prozessor nicht zu blockieren
+    for (let i = 1; i <= 254; i++) {
+        const ip = IP_BASE + i;
+        
+        // Beide Ports gleichzeitig prüfen
+        const promises = PORTS.map(port => checkDevice(ip, port));
+        
+        const results = await Promise.all(promises);
+        if (results.some(r => r === true)) {
+            foundAny = true;
+            // Wir stoppen nicht zwingend beim ersten, damit die Liste voll wird
         }
-        send({ event: events.SetConfig, key: 'enabled', value: e.target.checked.toString() });
-    }
-    send({ event: events.ReadConfig, key: 'rpcServer' });
-    send({ event: events.ReadConfig, key: 'enabled' });
-    send({ event: events.ScanSSDP });
-    setInterval(() => {
-        send({ event: events.ScanSSDP });
-    }, 10000);
-}
 
-function onMessage(data) {
-    const msg = JSON.parse(data.data);
-    switch(msg.Event) {
-        case events.ReadConfigResult:
-            if(msg.key === 'rpcServer' && !msg.error) {
-                canEnable = true;
-                document.getElementById('ssdpDeviceTitle').innerText = `SSDP Devices (Currently Connected to ${msg.value})`;
-            } else if(msg.key === 'enabled' && !msg.error) {
-                document.getElementById('enabled').checked = msg.value === 'true';
-            }
-            break;
-        case events.SSDPScanResult: {
-            for (const device of msg.devices) {
-                const url = device.UrlBase.indexOf('https') === 0 ? device.UrlBase.replace('https', 'wss') : device.UrlBase.replace('http', 'ws');
-
-                if (ssdpDevices.some(d => d.url === url)) {
-                    continue;
-                }
-                
-                const friendlyName = device.FriendlyName;
-                document.getElementById('ssdpItems').innerHTML += `
-                <div class="ssdpItem" data-uri="${url}" data-friendlyName="${friendlyName}" tabindex="0" onclick="setRPC('${url}')">
-                    <a>${friendlyName}</a>
-                </div>
-                `;
-                ssdpDevices.push({ url, friendlyName });
-            }
+        // Fortschrittsanzeige
+        if (i % 25 === 0) {
+            document.getElementById('status').innerHTML = `Scanning... ${Math.round((i/254)*100)}%`;
         }
     }
+
+    isScanning = false;
+    if (!foundAny) {
+        showManualInput();
+    }
 }
 
-window.setRPC = (url) =>  {
-    canEnable = true;
-    send({ event: events.SetConfig, key: 'rpcServer', value: url });
+function checkDevice(ip, port) {
+    return new Promise((resolve) => {
+        const testSocket = new WebSocket(`ws://${ip}:${port}`);
+        
+        // Timeout nach 1,5 Sekunden, falls der Port "hängt"
+        const timer = setTimeout(() => {
+            testSocket.close();
+            resolve(false);
+        }, 1500);
+
+        testSocket.onopen = () => {
+            clearTimeout(timer);
+            addDeviceToList(ip, port);
+            testSocket.close();
+            resolve(true);
+        };
+
+        testSocket.onerror = () => {
+            clearTimeout(timer);
+            resolve(false);
+        };
+    });
+}
+
+function addDeviceToList(ip, port) {
+    const url = `ws://${ip}:${port}`;
+    const container = document.getElementById('ssdpItems');
+    
+    // Duplikate vermeiden
+    if (document.querySelector(`[data-uri="${url}"]`)) return;
+
+    const html = `
+        <div class="ssdpItem" data-uri="${url}" tabindex="0" onclick="setRPC('${url}')">
+            <a>Gefunden: ${ip} (Port ${port})</a>
+        </div>
+    `;
+    container.innerHTML += html;
+}
+
+// Manuelle Eingabe Funktion
+window.manualConnect = () => {
+    const customIP = document.getElementById('manualIP').value;
+    const customPort = document.getElementById('manualPort').value || '8090';
+    if(customIP) {
+        setRPC(`ws://${customIP}:${customPort}`);
+    }
 }
