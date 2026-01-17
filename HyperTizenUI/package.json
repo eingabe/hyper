@@ -1,7 +1,7 @@
 {
   "name": "@foxreis/hypertizen",
   "appName": "HyperTizen",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "steffen",
   "packageType": "app",
   "appPath": "index.html",
