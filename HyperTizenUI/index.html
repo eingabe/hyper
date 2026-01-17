@@ -1,79 +1,184 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="de">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HyperTizen</title>
+    <title>HyperTizen Pro</title>
     <link rel="stylesheet" href="main.css">
     <script src="js/wsClient.js"></script>
     <script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>
+    <style>
+        /* Kurzes Styling für die neue Maske, falls main.css fehlt */
+        .manual-box {
+            margin-top: 20px;
+            padding: 15px;
+            border: 2px solid #555;
+            display: none; /* Standardmäßig versteckt */
+            background: rgba(255,255,255,0.1);
+        }
+        input[type="text"], input[type="number"] {
+            padding: 10px;
+            margin: 5px;
+            font-size: 1.2rem;
+        }
+        .ssdpItem:focus, input:focus, button:focus {
+            background-color: #0078d7;
+            color: white;
+            outline: 3px solid yellow;
+        }
+    </style>
 </head>
 
 <body>
     <div class="content">
         <h1>HyperTizen</h1>
-        <h3 id="status">Status</h3>
-        <a><input type="checkbox" id="enabled"> Enabled</a>
-        <h2 id="ssdpDeviceTitle">SSDP Devices</h2>
-        <div id="ssdpItems"></div>
+        
+        <div id="connectionStatus">
+            <h3 id="status">Initialisiere...</h3>
+        </div>
+
+        <div style="margin-bottom: 20px;">
+            <label>
+                <input type="checkbox" id="enabled" tabindex="0"> Aktivieren
+            </label>
+        </div>
+
+        <h2 id="ssdpDeviceTitle">Suche Hyperion Server...</h2>
+        <div id="ssdpItems">
+            </div>
+
+        <div id="manualDiscovery" class="manual-box">
+            <h3>Nichts gefunden? Manuelle Eingabe:</h3>
+            <input type="text" id="manualIP" placeholder="IP (z.B. 192.168.0.50)" tabindex="0">
+            <input type="number" id="manualPort" placeholder="8090" value="8090" tabindex="0">
+            <button id="btnManualConnect" tabindex="0">Verbinden</button>
+        </div>
     </div>
 </body>
 
 <script>
+    let elementsArray = [];
+    let focusedIndex = 0;
+
     window.onload = function () {
-        let elements = document.querySelectorAll('button, input, [tabindex]');
-        let elementsArray = Array.prototype.slice.call(elements);
-        let focusedElement = document.activeElement;
-        let focusedIndex = elementsArray.indexOf(focusedElement);
+        // --- TIZEN NAVIGATION LOGIC ---
+        function updateFocusableElements() {
+            const elements = document.querySelectorAll('button, input, .ssdpItem[tabindex="0"]');
+            elementsArray = Array.prototype.slice.call(elements);
+        }
 
         document.addEventListener('keydown', function (e) {
+            updateFocusableElements();
             if (e.key === 'ArrowDown') {
                 e.preventDefault();
                 if (focusedIndex < elementsArray.length - 1) {
-                    elementsArray[focusedIndex + 1].focus();
                     focusedIndex++;
+                    elementsArray[focusedIndex].focus();
                 }
             } else if (e.key === 'ArrowUp') {
                 e.preventDefault();
                 if (focusedIndex > 0) {
-                    elementsArray[focusedIndex - 1].focus();
                     focusedIndex--;
+                    elementsArray[focusedIndex].focus();
                 }
             } else if (e.key == 'Enter') {
-                e.preventDefault();
-                const element = elementsArray[focusedIndex];
-                element.click();
+                const element = document.activeElement;
+                // Wenn es ein SSDP Item ist
                 if (element.classList.contains('ssdpItem')) {
                     const uri = element.getAttribute('data-uri');
                     setRPC(uri);
+                } 
+                // Wenn es der manuelle Button ist
+                else if (element.id === 'btnManualConnect') {
+                    const ip = document.getElementById('manualIP').value;
+                    const port = document.getElementById('manualPort').value;
+                    if(ip) setRPC(`ws://${ip}:${port}`);
                 }
             }
         });
 
-        const observer = new MutationObserver(function (mutations) {
-            mutations.forEach(function (mutation) {
-                if (mutation.addedNodes.length > 0) {
-                    elements = document.querySelectorAll('button, input, [tabindex]');
-                    elementsArray = Array.prototype.slice.call(elements);
-                    focusedIndex = elementsArray.indexOf(document.activeElement);
-                }
-            });
+        // Automatische Aktualisierung der Liste bei Änderungen
+        const observer = new MutationObserver(() => {
+            updateFocusableElements();
         });
-
         observer.observe(document.body, { childList: true, subtree: true });
+
+        // --- SMART SCAN LOGIK ---
+        async function startSmartScan() {
+            const ports = [8090, 8096];
+            const baseIP = "192.168.0.";
+            let found = false;
+
+            document.getElementById('status').innerText = "Scanne 192.168.0.x...";
+
+            for (let i = 1; i <= 254; i++) {
+                const ip = baseIP + i;
+                // Zeige Fortschritt alle 20 IPs
+                if (i % 20 === 0) document.getElementById('status').innerText = `Scan läuft... ${ip}`;
+                
+                const checks = ports.map(port => {
+                    return new Promise((resolve) => {
+                        const socket = new WebSocket(`ws://${ip}:${port}`);
+                        const timer = setTimeout(() => { socket.close(); resolve(null); }, 400); // Schneller Timeout
+                        
+                        socket.onopen = () => {
+                            clearTimeout(timer);
+                            socket.close();
+                            resolve({ip, port});
+                        };
+                        socket.onerror = () => { clearTimeout(timer); resolve(null); };
+                    });
+                });
+
+                const results = await Promise.all(checks);
+                results.forEach(res => {
+                    if (res) {
+                        found = true;
+                        addDeviceToList(res.ip, res.port);
+                    }
+                });
+            }
+
+            if (!found) {
+                document.getElementById('status').innerText = "Kein Gerät gefunden.";
+                document.getElementById('manualDiscovery').style.display = "block";
+            } else {
+                document.getElementById('status').innerText = "Scan abgeschlossen.";
+            }
+        }
+
+        function addDeviceToList(ip, port) {
+            const url = `ws://${ip}:${port}`;
+            const container = document.getElementById('ssdpItems');
+            if (document.querySelector(`[data-uri="${url}"]`)) return;
+
+            const div = document.createElement('div');
+            div.className = 'ssdpItem';
+            div.setAttribute('data-uri', url);
+            div.setAttribute('tabindex', '0');
+            div.innerHTML = `<a>Gefunden: ${ip}:${port}</a>`;
+            container.appendChild(div);
+        }
+
+        // --- INITIALISIERUNG ---
         fetch('http://127.0.0.1:8081').then(res => res.text()).then(ip => {
             deviceIP = ip;
-
             const testWS = new WebSocket(`ws://${ip}:8086`);
 
             testWS.onopen = function () {
                 testWS.close();
-                open();
+                open(); // Startet die Standard wsClient.js Logik
+                // Starte unseren Smart Scan zusätzlich
+                startSmartScan();
             };
             testWS.onerror = function () {
-                location.reload();
+                document.getElementById('status').innerText = "Backend Fehler - lade neu...";
+                setTimeout(() => location.reload(), 3000);
             };
+        }).catch(err => {
+            document.getElementById('status').innerText = "Lokal-IP Fehler!";
+            document.getElementById('manualDiscovery').style.display = "block";
         });
     };
 </script>
